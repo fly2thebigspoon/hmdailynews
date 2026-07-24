@@ -12,7 +12,7 @@ def main():
     market_json = json.dumps(market, ensure_ascii=False, indent=2)
 
     brief = generate_brief(market_json)
-    header = "📊 <b>Good Morning Sir!</b>\n\n"
+    header = "<b>Good Morning Sir!</b>\n\n"
     send(header + brief)
     print("已推送。")
 
