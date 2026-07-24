@@ -17,7 +17,7 @@ def main():
     market_json = json.dumps(market, ensure_ascii=False, indent=2)
 
     brief = generate_brief(market_json)
-    header = "📊 <b>每日早间情报摘要</b>\n\n"
+    header = "📊 <b>Good Morning,Daily News</b>\n\n"
     send(header + brief)
     print("已推送。")
 
