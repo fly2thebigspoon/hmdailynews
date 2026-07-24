@@ -12,12 +12,11 @@ def main():
         "指数": get_index_data(),
         "标的明细": get_ticker_details(),
         "恐惧贪婪指数": get_fear_greed(),
-        "PutCall比率": get_put_call_ratio(),
-    }
+     }
     market_json = json.dumps(market, ensure_ascii=False, indent=2)
 
     brief = generate_brief(market_json)
-    header = "📊 <b>Good Morning,Daily News</b>\n\n"
+    header = "📊 <b>Good Morning Sir!</b>\n\n"
     send(header + brief)
     print("已推送。")
 
