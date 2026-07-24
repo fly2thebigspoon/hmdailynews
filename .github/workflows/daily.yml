@@ -2,8 +2,8 @@ name: Daily Intel Brief
 
 on:
   schedule:
-    # 首尔 05:30 = UTC 20:30 (前一天)
-    - cron: '30 20 * * *'
+    # 首尔 06:13 = UTC 21:13 (前一天)
+    - cron: '13 21 * * *'
   workflow_dispatch:  # 允许手动触发
 
 jobs:
