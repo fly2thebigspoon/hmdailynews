@@ -48,17 +48,4 @@ def get_ticker_details():
     return out
 
 
-def get_fear_greed():
-    """CNN Fear & Greed 指数"""
-    try:
-        url = "https://production.dataviz.cnn.io/index/fearandgreed/graphdata"
-        r = requests.get(url, headers={"User-Agent": "Mozilla/5.0"}, timeout=10)
-        d = r.json()["fear_and_greed"]
-        return {"score": round(d["score"], 1), "rating": d["rating"]}
-    except Exception as e:
-        return {"error": str(e)}
 
-
-def get_put_call_ratio():
-    """由 LLM 通过搜索检索最新 CBOE Put/Call ratio"""
-    return {"note": "由 LLM 检索最新 CBOE Put/Call ratio"}
