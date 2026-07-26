@@ -1,7 +1,7 @@
 import os
 from google import genai
 from google.genai import types
-from duckduckgo_search import DDGS
+from ddgs import DDGS
 
 # 推荐在免费层下使用 gemini-2.5-flash
 MODEL = os.getenv("GEMINI_MODEL", "gemini-3.5-flash")
