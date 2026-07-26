@@ -6,22 +6,38 @@ CLOUDFLARE_URL = "https://zrp-quote.irisvcorp.workers.dev/"
 def get_market_quote(symbol):
     """通过 Cloudflare Worker 获取单个标的最新数据"""
     try:
-        # 通过 ?symbol=xxx 拼接参数进行请求
         url = f"{CLOUDFLARE_URL}?symbol={symbol}"
         response = requests.get(url, timeout=10)
         
         if response.status_code == 200:
             data = response.json()
             
-            # 【重要】请核对你 Worker 返回的 JSON 格式
-            # 如果你的 Worker 返回的字段名不是 price、changePercent、mdd52，请在这里修改
-            price = data.get("price", "NaN")
-            change = data.get("changePercent", "NaN")
-            mdd = data.get("mdd52", "NaN") 
+            # 【修复】使用截图中正确的字段名
+            price = data.get("price")
+            change = data.get("changePct")
+            high52 = data.get("high52")
             
-            return price, change, mdd
+            # 如果没查到数据（返回 null），直接输出 NaN
+            if price is None:
+                return "NaN", "NaN", "NaN"
+                
+            # 计算 52W MDD ( (当前价 - 52周最高价) / 52周最高价 * 100 )
+            try:
+                mdd = ((float(price) - float(high52)) / float(high52)) * 100
+                mdd_str = str(round(mdd, 2))
+            except (TypeError, ValueError, ZeroDivisionError):
+                mdd_str = "NaN"
+                
+            # 保留两位小数格式化
+            try:
+                price_str = str(round(float(price), 2))
+                change_str = str(round(float(change), 2))
+            except:
+                price_str = str(price)
+                change_str = str(change)
+                
+            return price_str, change_str, mdd_str
         else:
-            print(f"[{symbol}] 请求失败，状态码: {response.status_code}")
             return "NaN", "NaN", "NaN"
             
     except Exception as e:
@@ -30,8 +46,6 @@ def get_market_quote(symbol):
 
 def get_index_data():
     """获取大盘指数数据"""
-    # 【注意】这里的代码（如 ^GSPC）需与你的 Worker 接口支持的格式一致
-    # 如果你的接口直接识别 SPX，就把 "^GSPC" 改成 "SPX"
     indices = {
         "SPX": "^GSPC",
         "NDX": "^NDX",
@@ -55,8 +69,7 @@ def get_ticker_details():
     for symbol in tickers:
         price, change, mdd = get_market_quote(symbol)
         
-        # 按照 prompt 要求的格式拼接，如: 284.98 (-1.87%) 52W(-7.43%)
-        if str(price) == "NaN":
+        if price == "NaN":
             result[symbol] = "NaN (NaN%) 52W(NaN%)"
         else:
             result[symbol] = f"{price} ({change}%) 52W({mdd}%)"
