@@ -2,7 +2,7 @@ import os
 from google import genai
 from google.genai import types
 
-MODEL = os.getenv("GEMINI_MODEL", "gemini-3.6-flash")
+MODEL = os.getenv("GEMINI_MODEL", "gemini-2.5-flash")
 
 PROMPT_TEMPLATE = """你是一位专业的金融与国际政治资深分析师。严格按照我要求提供内容。
 
