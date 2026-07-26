@@ -63,7 +63,7 @@ def get_index_data():
 
 def get_ticker_details():
     """获取具体标的明细"""
-    tickers = ["QQQM", "SCHD", "SPYM", "RKLB"]
+    tickers = ["QQQM", "SCHD", "SPYM"]
     
     result = {}
     for symbol in tickers:
