@@ -31,7 +31,7 @@ PROMPT_TEMPLATE = """你是一位专业的金融与国际政治资深分析师�
 1. 大盘指数:SPX+NDX+DJI+KOSPI+VIX (只要5种 用我给你代码,不要显示全称）
 2. 美股市场动向：分三条 纳斯达克，标普500，道琼斯 .提取今天最核心的驱动事件、具体的科技巨头财报/异动数据。
 3. 韩国头条：1条韩国股市动向。提取今天最核心的驱动事件、具体的科技巨头财报/异动数据。
-4. 中国头条：1条中国股市动向。提取今天最核心的驱动事件、具体的科技巨头财报/异动数据。。
+4. 中国头条：1条中国地缘政治及重大社会新闻。
 2. 宏观风险摆锤:评估当前全球市场脆弱性指数（1~10级，10为极高风险）。
 
 输出要求：
@@ -69,8 +69,8 @@ def fetch_web_news(query: str, max_results: int = 3) -> str:
 def generate_brief(market_json: str) -> str:
     print("正在免费抓取实时新闻...")
     us_news = fetch_web_news("US stock market breaking news OR specific geopolitical events today", max_results=10)
-    kr_news = fetch_web_news("韩国 股市 KOSPI", max_results=10)
-    cn_news = fetch_web_news("中国 股市 上证指数 A股", max_results=10)
+    kr_news = fetch_web_news("한국증시 코스피 KOSPI", max_results=10)
+    cn_news = fetch_web_news("中国 (外交部回应 OR 出口管制 OR 突发通报 OR 深度调查) 今日最新", max_results=10)
 
     # 1. 新增：获取首尔（Asia/Seoul）当天的准确年月日（例如 2026-07-26）
     tz = pytz.timezone('Asia/Seoul') 
