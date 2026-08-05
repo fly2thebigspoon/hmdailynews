@@ -272,7 +272,9 @@ def check_rules(pf, state, market, ticker_week):
         if isinstance(hi, (int, float)) and isinstance(px, (int, float)) and hi > 0:
             dd = (px - hi) / hi * 100
             if dd <= -20:
-                changes.append(f"낙폭: {r['name']} 52주 고점대비 {dd:.0f}%")
+                pl = r.get("pl_pct")
+                pl_txt = f" · 보유손익 {pl:+.0f}%" if isinstance(pl, (int, float)) else ""
+                changes.append(f"낙폭: {r['name']} 52주 고점대비 {dd:.0f}%{pl_txt}")
 
     for tk, wk in (ticker_week or {}).items():
         if isinstance(wk, (int, float)) and abs(wk) >= 8:
@@ -289,7 +291,7 @@ def diff_vs_last(pf, last):
     """지난주 기록(portfolio/weeklyHistory)과 비교해 '무엇이 바뀌었나'를 만든다.
        last 가 없으면(첫 실행) 빈 리스트를 돌려주고, 다음 주부터 채워진다."""
     if not last:
-        return {"first_run": True, "lines": []}
+        return {"first_run": True, "lines": [], "type_delta": {}}
     lines = []
     prev_mix = (last.get("assetMix") or {})
     prev_share = (last.get("topShares") or {})
@@ -301,7 +303,7 @@ def diff_vs_last(pf, last):
             lines.append(f"{k} {pv:.0f}% → {v:.0f}% ({v - pv:+.1f}%p)")
 
     # 개별 종목 비중 변화 (±1.5%p 이상)
-    cur_share = {(r["ticker"] or r["name"]): r["share"] for r in pf["rows"]}
+    cur_share = {(r["name"] or r["ticker"]): r["share"] for r in pf["rows"]}
     for name, v in cur_share.items():
         pv = prev_share.get(name)
         if isinstance(pv, (int, float)) and abs(v - pv) >= 1.5:
@@ -317,5 +319,11 @@ def diff_vs_last(pf, last):
         if prev_share.get(n, 0) >= 0.5:
             lines.append(f"청산/제외: {n} (지난주 {prev_share[n]:.1f}%)")
 
-    return {"first_run": False, "lines": lines}
+    # 자산군별 지난주 대비 비중 변화(%p) — build 의 자산군 줄에서 사용
+    type_delta = {}
+    for k, v in pf["type_share"].items():
+        pv = prev_mix.get(k)
+        if isinstance(pv, (int, float)):
+            type_delta[k] = v - pv
 
+    return {"first_run": False, "lines": lines, "type_delta": type_delta}
