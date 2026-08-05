@@ -10,7 +10,7 @@ import json
 import pytz
 
 from weekly_data import (fb_login, fb_read, fb_write, market_snapshot,
-                         week_change, analyze, check_rules, diff_vs_last)
+                         week_change, analyze, check_rules, diff_vs_last, idle_tracker)
 from weekly_brief import narrative
 from telegram_sender import send
 
@@ -30,7 +30,7 @@ def pct(v, digits=2):
     return f"{v:+.{digits}f}%" if isinstance(v, (int, float)) else "—"
 
 
-def build(pf, market, rules, diff, tw, week_note):
+def build(pf, market, rules, diff, tw, week_note, idle):
     cur = pf["display_cur"]
     L = []
     today = datetime.datetime.now(SEOUL).strftime("%Y-%m-%d")
@@ -52,21 +52,32 @@ def build(pf, market, rules, diff, tw, week_note):
         L += [f"· {x}" for x in rules["changes"][:8]]
     L.append("")
 
-    # ── 포트폴리오 스냅샷 ──
-    L.append("<b>💼 포트폴리오</b>")
-    L.append(f"총평가액 {money(pf['total_display'], cur)}"
-             + (f"  (주간 {pct(pf['wow_pct'])})" if pf["wow_pct"] is not None else "  (주간 비교 데이터 축적 중)"))
-    for r in pf["rows"][:6]:
-        wk = tw.get(r["ticker"])
-        tag = r["ticker"] or r["name"]
-        L.append(f"· {tag} {r['share']:.1f}%"
-                 + (f" ｜ 주간 {pct(wk,1)}" if wk is not None else "")
-                 + (f" ｜ 누적 {pct(r['pl_pct'],1)}" if r["pl_pct"] is not None else ""))
-    if len(pf["rows"]) > 6:
-        L.append(f"<i>… 외 {len(pf['rows']) - 6}개</i>")
-    ts = pf["type_share"]
-    if ts:
-        L.append("자산군 " + " ｜ ".join(f"{k} {v:.0f}%" for k, v in ts.items()))
+    # ── 공회전 추적 (현금 보유의 기회비용) ──
+    if idle:
+        L.append("<b>⏳ 공회전 추적</b>")
+        if idle.get("error"):
+            L.append(f"· {idle['error']}")
+        else:
+            wk = idle["weeks"]
+            amt = abs(idle["diff_disp"])
+            L.append(f"가상 정기투자({idle['bench']}) 대비 {wk}주 누적")
+            if wk <= 1 or amt < 1:
+                L.append("· 이번 주부터 누적 시작 — 다음 주부터 손익 비교가 표시됩니다")
+            else:
+                sign = "놓친 수익" if idle["missed"] else "회피한 손실"
+                L.append(f"· {sign}: {money(amt, idle['diff_cur'])} "
+                         f"(현금 보유가 {'불리' if idle['missed'] else '유리'})")
+                L.append(f"· 기다린 게 옳았던 주: {idle['weeks_right']} / {wk}")
+            if idle.get("signal_note"):
+                if idle.get("signal_hit") is None:
+                    seen = "판정 조건 없음"
+                else:
+                    seen = f"이번 주 {'출현' if idle['signal_hit'] else '미출현'} · 누적 {idle['signal_seen']}회"
+                L.append(f"· 내가 기다리는 신호: {idle['signal_note']} → {seen}")
+                if idle.get("signal_expr") and idle.get("signal_seen") == 0 and wk >= 4:
+                    L.append(f"  <i>{wk}주째 그 신호는 한 번도 나오지 않았습니다. 신념입니까, 미루는 핑계입니까?</i>")
+            if idle.get("deadline"):
+                L.append(f"· 대기 종료일: {idle['deadline']}")
     L.append("")
 
     # ── 구조적 상태 (접어서 맨 아래, 참고용) ──
@@ -127,10 +138,12 @@ def main():
 
     rules = check_rules(pf, state, market, tw)
     diff = diff_vs_last(pf, last)
+    idle_view, idle_save = idle_tracker(state, market, last)
+    print(f"공회전: {'on' if idle_view else 'off'}")
     print(f"규칙: 상시 {len(rules['standing'])} · 변화 {len(rules['changes'])} · 구성변화 {len(diff['lines'])}")
 
     note = "" if pf["wow_pct"] is not None else " · 주간 비교는 다음 주부터"
-    head = build(pf, market, rules, diff, tw, note)
+    head = build(pf, market, rules, diff, tw, note, idle_view)
 
     # LLM 에 넘기는 컨텍스트: 비중과 규칙만. 금액은 넘기지 않는다.
     pf_context = json.dumps({
@@ -152,11 +165,14 @@ def main():
 
     # 구성비 이력 — 앱이 쓰는 portfolio/main 이 아닌 별도 문서에 기록
     try:
-        fb_write(token, "portfolio/weeklyHistory", {
+        hist = {
             "updatedAt": datetime.datetime.now(SEOUL).strftime("%Y-%m-%d"),
             "assetMix": {k: round(v, 2) for k, v in pf["type_share"].items()},
-            "topShares": {r["ticker"] or r["name"]: round(r["share"], 2) for r in pf["rows"][:10]},
-        })
+            "topShares": {(r["name"] or r["ticker"]): round(r["share"], 2) for r in pf["rows"][:10]},
+        }
+        if idle_save:
+            hist["idle"] = idle_save
+        fb_write(token, "portfolio/weeklyHistory", hist)
         print("firestore: 구성비 이력 기록 완료")
     except Exception as e:
         print(f"firestore: 이력 기록 건너뜀 ({type(e).__name__})")
