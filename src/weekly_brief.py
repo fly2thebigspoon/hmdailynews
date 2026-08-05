@@ -107,8 +107,17 @@ RENDER = """너는 주간 리포트의 서술 파트를 쓰는 편집자다. 아
 두 단락 본문만 출력한다."""
 
 
+_CLIENT = None
+
+
 def _client():
-    return genai.Client(api_key=os.environ["GEMINI_API_KEY"])
+    # 클라이언트를 한 번만 만들어 재사용한다.
+    # 매 호출마다 새로 만들면 google-genai 신버전에서 인스턴스가 닫혀
+    # 두 번째 요청이 "client has been closed" 로 실패한다.
+    global _CLIENT
+    if _CLIENT is None:
+        _CLIENT = genai.Client(api_key=os.environ["GEMINI_API_KEY"])
+    return _CLIENT
 
 
 def _ask(prompt, as_json):
@@ -124,17 +133,21 @@ def narrative(market_json, pf_context):
     week_label = now.strftime("%Y-%m-%d")
     src = collect(week_label)
 
-    facts_raw = _ask(EXTRACT.format(week_label=week_label, market_json=market_json,
-                                    us=src["us"], kr=src["kr"], macro=src["macro"],
-                                    no_data=NO_DATA), as_json=True)
     try:
+        facts_raw = _ask(EXTRACT.format(week_label=week_label, market_json=market_json,
+                                        us=src["us"], kr=src["kr"], macro=src["macro"],
+                                        no_data=NO_DATA), as_json=True)
         facts = json.loads(facts_raw)
-    except Exception:
-        print("[stage-a] JSON 파싱 실패")
-        return "<i>本周叙事生成失败，仅提供数据部分。</i>"
+    except Exception as e:
+        print(f"[stage-a] 실패: {type(e).__name__}")
+        return "<i>本周市场叙事生成失败，数据部分见上。</i>"
 
-    body = _ask(RENDER.format(facts_json=json.dumps(facts, ensure_ascii=False, indent=2),
-                              pf_context=pf_context), as_json=False)
+    try:
+        body = _ask(RENDER.format(facts_json=json.dumps(facts, ensure_ascii=False, indent=2),
+                                  pf_context=pf_context), as_json=False)
+    except Exception as e:
+        print(f"[stage-b] 실패: {type(e).__name__}")
+        return "<i>本周市场叙事生成失败，数据部分见上。</i>"
     note = facts.get("consistency_note")
     if note:
         body += f"\n\n<i>⚠️ {note}</i>"
