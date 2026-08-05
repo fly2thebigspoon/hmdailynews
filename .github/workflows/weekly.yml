@@ -1,0 +1,26 @@
+name: Weekly Portfolio Report
+
+# 트리거는 cron-job.org 가 workflow_dispatch API 로 호출한다 (매주 토 KST 07:00).
+# GitHub Actions 의 schedule 은 지연·미발동이 잦아 쓰지 않는다.
+on:
+  workflow_dispatch:
+
+jobs:
+  weekly:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - run: pip install -r requirements.txt
+      - name: Run weekly report
+        env:
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+          GEMINI_MODEL: ${{ secrets.GEMINI_MODEL }}
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+          FB_API_KEY: ${{ secrets.FB_API_KEY }}
+          FB_EMAIL: ${{ secrets.FB_EMAIL }}
+          FB_PASSWORD: ${{ secrets.FB_PASSWORD }}
+        run: python src/weekly_main.py
