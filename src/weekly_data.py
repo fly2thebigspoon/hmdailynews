@@ -327,3 +327,135 @@ def diff_vs_last(pf, last):
             type_delta[k] = v - pv
 
     return {"first_run": False, "lines": lines, "type_delta": type_delta}
+
+
+
+# ============================================================
+# 5) 공회전 추적 (현금 보유의 기회비용)
+#    - 매주 '가상 정기투자 1회분'을 벤치마크에 넣었다고 가정하고 누적한다.
+#    - 이력(shares 누적, 투입 원금)은 weeklyHistory 문서에 함께 저장한다.
+#    - 부추기지 않는다: 시장이 내리면 diff 는 +(회피한 손실), 오르면 -(놓친 수익).
+# ============================================================
+
+def _to_cny_amount(amount, cur, state):
+    """정기투자 금액(사용자 지정 통화)을 CNY로. analyze 와 같은 rates 사용."""
+    r = (state.get("rates") or {}).get(cur or "KRW") or 0
+    return amount * r
+
+
+def _from_cny_to_display(cny, state):
+    cur = (state.get("meta") or {}).get("displayCurrency") or "KRW"
+    if cur == "CNY":
+        return cny, cur
+    fx = ((state.get("fx") or {}).get("data") or {})
+    pair = (fx.get(f"CNY{cur}=X") or {}).get("price")
+    if isinstance(pair, (int, float)) and pair > 0:
+        return cny * pair, cur
+    r = (state.get("rates") or {}).get(cur) or 0
+    return (cny / r if r else 0), cur
+
+
+def _check_signal(expr, market):
+    """'VIX>=25' / 'SPX_DD>=10' 같은 조건이 이번 주에 충족됐는지. 못 알아보면 None."""
+    if not expr:
+        return None
+    import re
+    m = re.match(r"^(VIX|SPX_DD)(>=|<=|>|<)([\d.]+)$", expr.strip().upper())
+    if not m:
+        return None
+    key, op, val = m.group(1), m.group(2), float(m.group(3))
+    idx = market.get("indices") or {}
+    if key == "VIX":
+        cur = (idx.get("VIX") or {}).get("price")
+    else:  # SPX_DD: S&P 고점대비 하락% (양수). 주간 데이터로는 근사만 가능 → 주간 하락폭으로 대체 근사
+        wk = (idx.get("S&P 500") or {}).get("week")
+        cur = -wk if isinstance(wk, (int, float)) else None
+    if not isinstance(cur, (int, float)):
+        return None
+    if op == ">=": return cur >= val
+    if op == "<=": return cur <= val
+    if op == ">":  return cur > val
+    if op == "<":  return cur < val
+    return None
+
+
+def idle_tracker(state, market, last):
+    """공회전 추적 계산.
+       last: 지난주 weeklyHistory (idle 누적 필드 포함 가능).
+       반환: 화면에 뿌릴 dict, 그리고 이번 주 저장할 idle 상태.
+       설정이 꺼져 있으면 (None, None)."""
+    cfg = ((state.get("meta") or {}).get("idleTrack") or {})
+    if not cfg.get("enabled") or not (cfg.get("weekly") or 0) > 0:
+        return None, None
+
+    weekly = float(cfg["weekly"])
+    cur = cfg.get("cur") or "KRW"
+    bench = (cfg.get("benchmark") or "VOO").upper()
+
+    # 벤치마크 현재가
+    q = quote(bench)
+    px = q.get("price") if q else None
+    if not isinstance(px, (int, float)) or px <= 0:
+        return {"error": f"{bench} 시세를 가져오지 못했습니다"}, None
+
+    # 지난주까지 누적된 상태
+    prev = (last or {}).get("idle") or {}
+    prev_shares = float(prev.get("shares") or 0)      # 벤치마크 누적 주수
+    prev_principal_cny = float(prev.get("principalCny") or 0)
+    prev_weeks = int(prev.get("weeks") or 0)
+    prev_right = int(prev.get("weeksRight") or 0)     # '기다리길 잘한' 주 수
+    prev_bench_px = prev.get("lastBenchPx")           # 지난주 벤치마크가(승패 판정용)
+
+    # 이번 주 1회분 투입 (통화 → 그 통화 기준 주수. 간단히 '표시통화 무관하게 CNY로 환산 후 벤치가로 나눔')
+    invest_cny = _to_cny_amount(weekly, cur, state)
+    bench_px_cny = px * ((state.get("rates") or {}).get(q.get("currency") or "USD") or 0)
+    add_shares = (invest_cny / bench_px_cny) if bench_px_cny > 0 else 0
+
+    shares = prev_shares + add_shares
+    principal_cny = prev_principal_cny + invest_cny
+    weeks = prev_weeks + 1
+
+    # 가상 포트폴리오 현재가치 (CNY)
+    value_cny = shares * bench_px_cny
+
+    # 현금 보유분의 현재가치: 원금 그대로(이자 무시, 보수적) — 필요시 SGOV로 대체 가능하나 단순화
+    cash_value_cny = principal_cny
+
+    diff_cny = value_cny - cash_value_cny    # +면 투자가 나았음(놓친 수익), -면 현금이 나았음(회피한 손실)
+
+    # 이번 주 '기다린 게 옳았나': 지난주 대비 벤치마크가 내렸으면 현금이 옳았음(+1)
+    right_delta = 0
+    if isinstance(prev_bench_px, (int, float)) and prev_bench_px > 0:
+        if px < prev_bench_px:
+            right_delta = 1
+    weeks_right = prev_right + right_delta
+
+    # 신호 체크
+    sig_hit = _check_signal(cfg.get("waitSignal"), market)
+    prev_sig_seen = int(prev.get("signalSeenCount") or 0)
+    sig_seen = prev_sig_seen + (1 if sig_hit else 0)
+
+    disp_diff, dcur = _from_cny_to_display(diff_cny, state)
+
+    view = {
+        "bench": bench,
+        "weeks": weeks,
+        "diff_disp": disp_diff,
+        "diff_cur": dcur,
+        "missed": diff_cny > 0,          # True=놓친 수익 / False=회피한 손실
+        "weeks_right": weeks_right,
+        "signal_note": cfg.get("signalNote") or "",
+        "signal_expr": cfg.get("waitSignal") or "",
+        "signal_hit": sig_hit,           # True/False/None
+        "signal_seen": sig_seen,
+        "deadline": cfg.get("deadline") or "",
+    }
+    save_idle = {
+        "shares": round(shares, 6),
+        "principalCny": round(principal_cny, 2),
+        "weeks": weeks,
+        "weeksRight": weeks_right,
+        "lastBenchPx": px,
+        "signalSeenCount": sig_seen,
+    }
+    return view, save_idle
