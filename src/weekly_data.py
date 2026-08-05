@@ -1,0 +1,270 @@
+"""
+주간 리포트 데이터 계층
+  1) Firestore REST 로 앱 상태(portfolio/main) 읽기
+  2) Cloudflare Worker 로 시장 데이터 수집
+  3) 포트폴리오 지표 계산 + 규칙 판정
+
+⚠️ 이 저장소는 Public 입니다.
+   보유 종목·금액·평가액은 절대 print() 하지 마세요. Actions 로그는 누구나 볼 수 있습니다.
+   진행 상황 로그는 숫자 없는 상태 문자열만 출력합니다.
+"""
+
+import os
+import time
+import datetime
+import requests
+
+WORKER = "https://zrp-quote.irisvcorp.workers.dev/"
+PROJECT = "zrp-portfolio"
+FS = f"https://firestore.googleapis.com/v1/projects/{PROJECT}/databases/(default)/documents"
+
+TIMEOUT = 20
+
+
+# ============================================================
+# 1) Firestore
+# ============================================================
+
+def fb_login():
+    """앱과 동일한 이메일/비밀번호 계정으로 로그인. 관리자 권한을 쓰지 않는다."""
+    key = os.environ["FB_API_KEY"]
+    r = requests.post(
+        f"https://identitytoolkit.googleapis.com/v1/accounts:signInWithPassword?key={key}",
+        json={"email": os.environ["FB_EMAIL"],
+              "password": os.environ["FB_PASSWORD"],
+              "returnSecureToken": True},
+        timeout=TIMEOUT,
+    )
+    r.raise_for_status()
+    return r.json()["idToken"]
+
+
+def _dec(v):
+    """Firestore REST 의 타입 래핑을 평범한 파이썬 값으로 되돌린다."""
+    if "nullValue" in v:      return None
+    if "booleanValue" in v:   return v["booleanValue"]
+    if "integerValue" in v:   return int(v["integerValue"])
+    if "doubleValue" in v:    return float(v["doubleValue"])
+    if "stringValue" in v:    return v["stringValue"]
+    if "timestampValue" in v: return v["timestampValue"]
+    if "arrayValue" in v:     return [_dec(x) for x in v["arrayValue"].get("values", [])]
+    if "mapValue" in v:       return {k: _dec(x) for k, x in v["mapValue"].get("fields", {}).items()}
+    return None
+
+
+def _enc(o):
+    if o is None:                return {"nullValue": None}
+    if isinstance(o, bool):      return {"booleanValue": o}
+    if isinstance(o, int):       return {"integerValue": str(o)}
+    if isinstance(o, float):     return {"doubleValue": o}
+    if isinstance(o, str):       return {"stringValue": o}
+    if isinstance(o, list):      return {"arrayValue": {"values": [_enc(x) for x in o]}}
+    if isinstance(o, dict):      return {"mapValue": {"fields": {k: _enc(v) for k, v in o.items()}}}
+    return {"stringValue": str(o)}
+
+
+def fb_read(token, path="portfolio/main"):
+    r = requests.get(f"{FS}/{path}",
+                     headers={"Authorization": f"Bearer {token}"}, timeout=TIMEOUT)
+    r.raise_for_status()
+    return {k: _dec(v) for k, v in r.json().get("fields", {}).items()}
+
+
+def fb_write(token, path, obj):
+    """주간 구성비 이력 저장용. 앱이 쓰는 portfolio/main 은 절대 건드리지 않는다."""
+    r = requests.patch(
+        f"{FS}/{path}",
+        headers={"Authorization": f"Bearer {token}"},
+        json={"fields": {k: _enc(v) for k, v in obj.items()}},
+        timeout=TIMEOUT,
+    )
+    r.raise_for_status()
+    return True
+
+
+# ============================================================
+# 2) 시장 데이터 (Cloudflare Worker)
+# ============================================================
+
+def _worker(params):
+    try:
+        r = requests.get(WORKER, params=params, timeout=TIMEOUT)
+        if r.status_code == 200:
+            return r.json()
+    except Exception as e:
+        print(f"[worker] {params.get('symbol', params)} 실패: {type(e).__name__}")
+    return None
+
+
+def quote(symbol):
+    return _worker({"symbol": symbol}) or {}
+
+
+def week_change(symbol):
+    """?wk=1 은 1개월 일봉을 돌려준다. 7일 전 마지막 종가 대비 변화율(%)."""
+    j = _worker({"symbol": symbol, "wk": "1"})
+    if not j:
+        return None
+    ds, cs = j.get("dates") or [], j.get("closes") or []
+    if len(cs) < 2:
+        return None
+    cutoff = time.time() - 7 * 86400
+    base = None
+    for t, c in zip(ds, cs):
+        if t <= cutoff:
+            base = c
+    if not base:
+        base = cs[0]
+    return (cs[-1] / base - 1) * 100 if base else None
+
+
+INDICES = {"S&P 500": "^GSPC", "나스닥": "^IXIC", "다우": "^DJI",
+           "코스피": "^KS11", "VIX": "^VIX"}
+
+
+def market_snapshot():
+    out = {"indices": {}, "rates": {}, "fg": {}}
+    for label, sym in INDICES.items():
+        q = quote(sym)
+        out["indices"][label] = {
+            "price": q.get("price"),
+            "day": q.get("changePct"),
+            "week": week_change(sym),
+        }
+    ust = _worker({"ust": "1"}) or {}
+    if ust.get("y10") is not None:
+        prev = ust.get("prev") or {}
+        out["rates"] = {
+            "fedLo": ust.get("fedLo"), "fedHi": ust.get("fedHi"),
+            "y2": ust.get("y2"), "y10": ust.get("y10"), "y30": ust.get("y30"),
+            "spread": (ust["y10"] - ust["y2"]) if ust.get("y2") is not None else None,
+            "d10": ((ust["y10"] - prev["y10"]) * 100) if prev.get("y10") is not None else None,
+            "date": ust.get("date"),
+        }
+    fg = _worker({"fg": "1"}) or {}
+    if fg.get("score") is not None:
+        out["fg"] = {"score": fg["score"], "rating": fg.get("rating")}
+    return out
+
+
+# ============================================================
+# 3) 포트폴리오 지표
+# ============================================================
+
+def _cny(h, rates):
+    return (h.get("qty") or 0) * (h.get("price") or 0) * (rates.get(h.get("cur") or "KRW") or 0)
+
+
+def _to_display(cny, state):
+    """CNY -> 표시통화. 앱의 convDirect 와 같은 우선순위(실제 환율 페어 우선)."""
+    cur = (state.get("meta") or {}).get("displayCurrency") or "KRW"
+    if cur == "CNY":
+        return cny
+    fx = ((state.get("fx") or {}).get("data") or {})
+    pair = fx.get(f"CNY{cur}=X") or {}
+    p = pair.get("price")
+    if isinstance(p, (int, float)) and p > 0:
+        return cny * p
+    r = (state.get("rates") or {}).get(cur) or 0
+    return cny / r if r else 0
+
+
+def analyze(state):
+    rates = state.get("rates") or {}
+    meta = state.get("meta") or {}
+    holdings = [h for h in (state.get("holdings") or []) if isinstance(h, dict)]
+
+    total = sum(_cny(h, rates) for h in holdings)
+    rows = []
+    for h in holdings:
+        v = _cny(h, rates)
+        avg, px, qty = h.get("avgCost") or 0, h.get("price") or 0, h.get("qty") or 0
+        rows.append({
+            "name": h.get("name") or "(미지정)",
+            "ticker": (h.get("ticker") or "").upper(),
+            "type": h.get("type") or "",
+            "account": h.get("account") or "",
+            "value_cny": v,
+            "share": (v / total * 100) if total else 0,
+            "pl_pct": ((px - avg) / avg * 100) if avg > 0 else None,
+            "target": h.get("targetPct"),
+        })
+    rows.sort(key=lambda r: -r["value_cny"])
+
+    by_type = {}
+    for r in rows:
+        by_type[r["type"]] = by_type.get(r["type"], 0) + r["value_cny"]
+    type_share = {k: (v / total * 100 if total else 0) for k, v in by_type.items()}
+
+    # 주간 순자산 변화 — 앱이 매일 남기는 snapshots 사용
+    snaps = [s for s in (state.get("snapshots") or []) if isinstance(s, dict) and s.get("d")]
+    snaps.sort(key=lambda s: s["d"])
+    wow = None
+    if snaps:
+        target = (datetime.date.today() - datetime.timedelta(days=7)).isoformat()
+        base = None
+        for s in snaps:
+            if s["d"] <= target:
+                base = s
+        if base and base.get("cny"):
+            wow = (total / base["cny"] - 1) * 100
+
+    return {
+        "total_cny": total,
+        "total_display": _to_display(total, state),
+        "display_cur": meta.get("displayCurrency") or "KRW",
+        "rows": rows,
+        "type_share": type_share,
+        "wow_pct": wow,
+        "snap_days": len(snaps),
+    }
+
+
+# ============================================================
+# 4) 규칙 판정 — 숫자 판단은 전부 여기서. LLM 은 개입하지 않는다.
+# ============================================================
+
+def check_rules(pf, state, market, ticker_week):
+    meta = state.get("meta") or {}
+    conc = meta.get("concThreshold") or 15
+    floor = meta.get("cashFloor") or 40
+    floor_type = meta.get("cashFloorType") or "현금형"
+    reb = meta.get("rebalThreshold") or 5
+    hits = []
+
+    # 집중도 — 현금성 자산은 집중 위험이 아니므로 제외
+    for r in pf["rows"]:
+        if r["type"] == floor_type:
+            continue
+        if r["share"] > conc:
+            hits.append(f"집중도: {r['name']} {r['share']:.1f}% (기준 {conc}% 초과)")
+
+    cash = pf["type_share"].get(floor_type, 0)
+    if cash < floor:
+        hits.append(f"현금 수위: {floor_type} {cash:.1f}% (하한 {floor}% 미달)")
+
+    val = ((state.get("valuation") or {}).get("data") or {})
+    for r in pf["rows"]:
+        d = val.get(r["ticker"]) or {}
+        hi, px = d.get("high52"), d.get("price")
+        if isinstance(hi, (int, float)) and isinstance(px, (int, float)) and hi > 0:
+            dd = (px - hi) / hi * 100
+            if dd <= -20:
+                hits.append(f"낙폭: {r['name']} 52주 고점대비 {dd:.1f}%")
+
+    for tk, wk in (ticker_week or {}).items():
+        if isinstance(wk, (int, float)) and abs(wk) >= 8:
+            hits.append(f"주간 급변동: {tk} {wk:+.1f}%")
+
+    # 리밸런싱은 상시 켜져 있기 쉬워 마지막에 둔다
+    for t in (state.get("assetTypes") or []):
+        name, tgt = t.get("name"), (t.get("target") or 0) * 100
+        cur = pf["type_share"].get(name, 0)
+        if abs(cur - tgt) >= reb:
+            hits.append(f"리밸런싱: {name} {cur:.1f}% / 목표 {tgt:.0f}% ({cur - tgt:+.1f}%p)")
+
+    rt = market.get("rates") or {}
+    if isinstance(rt.get("spread"), (int, float)) and rt["spread"] < 0:
+        hits.append(f"장단기 금리 역전: 10Y−2Y {rt['spread']:+.2f}%p")
+
+    return hits
