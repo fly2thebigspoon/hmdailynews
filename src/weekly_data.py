@@ -224,25 +224,47 @@ def analyze(state):
 # 4) 규칙 판정 — 숫자 판단은 전부 여기서. LLM 은 개입하지 않는다.
 # ============================================================
 
+def _is_cash_type(name):
+    """현금형/현금/cash 계열 자산군인지. meta.cashFloorType 이 바뀌어 있을 수 있어 이름으로 판정."""
+    n = (name or "").lower()
+    return ("현금" in n) or ("cash" in n) or ("예수" in n) or ("mmf" in n)
+
+
 def check_rules(pf, state, market, ticker_week):
+    """규칙을 두 갈래로 나눠 돌려준다.
+       standing: 매주 거의 항상 참인 구조적 상태(집중도/현금수위/목표배분 이탈)
+       changes : 이번 주에 '새로' 또는 '더 심하게' 발생한 것 (낙폭·급변동·금리역전)
+    """
     meta = state.get("meta") or {}
     conc = meta.get("concThreshold") or 15
     floor = meta.get("cashFloor") or 40
-    floor_type = meta.get("cashFloorType") or "현금형"
     reb = meta.get("rebalThreshold") or 5
-    hits = []
 
-    # 집중도 — 현금성 자산은 집중 위험이 아니므로 제외
+    standing, changes = [], []
+
+    # 현금성 자산군 실제 비중 (이름 기반 합산)
+    cash_share = sum(v for k, v in pf["type_share"].items() if _is_cash_type(k))
+
+    # ── 상시(구조적) ──
     for r in pf["rows"]:
-        if r["type"] == floor_type:
-            continue
+        if _is_cash_type(r["type"]):
+            continue                     # 현금성 단일 항목은 집중 위험으로 보지 않음
         if r["share"] > conc:
-            hits.append(f"집중도: {r['name']} {r['share']:.1f}% (기준 {conc}% 초과)")
+            standing.append(f"집중도: {r['name']} {r['share']:.1f}% (기준 {conc}%)")
 
-    cash = pf["type_share"].get(floor_type, 0)
-    if cash < floor:
-        hits.append(f"현금 수위: {floor_type} {cash:.1f}% (하한 {floor}% 미달)")
+    if cash_share < floor:
+        standing.append(f"현금 수위: {cash_share:.1f}% (하한 {floor}% 미달)")
+    elif cash_share > 100 - floor:
+        # 현금이 과도하게 높은 경우(=투자 비중 낮음)도 알려준다
+        standing.append(f"현금 과다: 현금성 {cash_share:.1f}%")
 
+    for t in (state.get("assetTypes") or []):
+        name, tgt = t.get("name"), (t.get("target") or 0) * 100
+        cur = pf["type_share"].get(name, 0)
+        if abs(cur - tgt) >= reb:
+            standing.append(f"{name} {cur:.1f}% / 목표 {tgt:.0f}% ({cur - tgt:+.1f}%p)")
+
+    # ── 변화(이번 주 신규/악화) ──
     val = ((state.get("valuation") or {}).get("data") or {})
     for r in pf["rows"]:
         d = val.get(r["ticker"]) or {}
@@ -250,21 +272,50 @@ def check_rules(pf, state, market, ticker_week):
         if isinstance(hi, (int, float)) and isinstance(px, (int, float)) and hi > 0:
             dd = (px - hi) / hi * 100
             if dd <= -20:
-                hits.append(f"낙폭: {r['name']} 52주 고점대비 {dd:.1f}%")
+                changes.append(f"낙폭: {r['name']} 52주 고점대비 {dd:.0f}%")
 
     for tk, wk in (ticker_week or {}).items():
         if isinstance(wk, (int, float)) and abs(wk) >= 8:
-            hits.append(f"주간 급변동: {tk} {wk:+.1f}%")
-
-    # 리밸런싱은 상시 켜져 있기 쉬워 마지막에 둔다
-    for t in (state.get("assetTypes") or []):
-        name, tgt = t.get("name"), (t.get("target") or 0) * 100
-        cur = pf["type_share"].get(name, 0)
-        if abs(cur - tgt) >= reb:
-            hits.append(f"리밸런싱: {name} {cur:.1f}% / 목표 {tgt:.0f}% ({cur - tgt:+.1f}%p)")
+            changes.append(f"주간 급변동: {tk} {wk:+.1f}%")
 
     rt = market.get("rates") or {}
     if isinstance(rt.get("spread"), (int, float)) and rt["spread"] < 0:
-        hits.append(f"장단기 금리 역전: 10Y−2Y {rt['spread']:+.2f}%p")
+        changes.append(f"장단기 금리 역전: 10Y−2Y {rt['spread']:+.2f}%p")
 
-    return hits
+    return {"standing": standing, "changes": changes}
+
+
+def diff_vs_last(pf, last):
+    """지난주 기록(portfolio/weeklyHistory)과 비교해 '무엇이 바뀌었나'를 만든다.
+       last 가 없으면(첫 실행) 빈 리스트를 돌려주고, 다음 주부터 채워진다."""
+    if not last:
+        return {"first_run": True, "lines": []}
+    lines = []
+    prev_mix = (last.get("assetMix") or {})
+    prev_share = (last.get("topShares") or {})
+
+    # 자산군 비중 변화 (±1.0%p 이상만)
+    for k, v in pf["type_share"].items():
+        pv = prev_mix.get(k)
+        if isinstance(pv, (int, float)) and abs(v - pv) >= 1.0:
+            lines.append(f"{k} {pv:.0f}% → {v:.0f}% ({v - pv:+.1f}%p)")
+
+    # 개별 종목 비중 변화 (±1.5%p 이상)
+    cur_share = {(r["ticker"] or r["name"]): r["share"] for r in pf["rows"]}
+    for name, v in cur_share.items():
+        pv = prev_share.get(name)
+        if isinstance(pv, (int, float)) and abs(v - pv) >= 1.5:
+            lines.append(f"{name} {pv:.1f}% → {v:.1f}% ({v - pv:+.1f}%p)")
+
+    # 신규 편입 / 완전 청산
+    new_names = set(cur_share) - set(prev_share)
+    gone_names = set(prev_share) - set(cur_share)
+    for n in sorted(new_names):
+        if cur_share.get(n, 0) >= 0.5:
+            lines.append(f"신규 편입: {n} ({cur_share[n]:.1f}%)")
+    for n in sorted(gone_names):
+        if prev_share.get(n, 0) >= 0.5:
+            lines.append(f"청산/제외: {n} (지난주 {prev_share[n]:.1f}%)")
+
+    return {"first_run": False, "lines": lines}
+
