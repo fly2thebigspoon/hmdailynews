@@ -107,6 +107,57 @@ def build(pf, market, rules, diff, tw, week_note, idle):
     return "\n".join(L)
 
 
+def build_structured(pf, market, rules, diff, tw, idle, narrative_html, week_label, gen_at):
+    """앱이 자체 카드 UI로 렌더할 수 있도록 구조화된 데이터를 만든다.
+       Telegram 텍스트와 동일한 계산 결과를 필드로 분해할 뿐, 새 계산은 없다."""
+    idx = []
+    for name, d in (market.get("indices") or {}).items():
+        idx.append({"name": name,
+                    "price": round(d["price"], 2) if isinstance(d.get("price"), (int, float)) else None,
+                    "week": round(d["week"], 1) if isinstance(d.get("week"), (int, float)) else None})
+    rt = market.get("rates") or {}
+    fg = market.get("fg") or {}
+
+    idle_obj = None
+    if idle and not idle.get("error"):
+        wk = idle["weeks"]
+        if wk <= 1 or abs(idle["diff_disp"]) < 1:
+            diff_text = "이번 주부터 누적 시작 — 다음 주부터 손익 비교"
+            weeks_right = None
+        else:
+            sign = "놓친 수익" if idle["missed"] else "회피한 손실"
+            side = "불리" if idle["missed"] else "유리"
+            diff_text = f"{sign} {money(abs(idle['diff_disp']), idle['diff_cur'])} (현금 보유가 {side})"
+            weeks_right = f"{idle['weeks_right']} / {wk}"
+        sig_line = None
+        if idle.get("signal_note"):
+            if idle.get("signal_hit") is None:
+                seen = "판정 조건 없음"
+            else:
+                seen = f"이번 주 {'출현' if idle['signal_hit'] else '미출현'} · 누적 {idle['signal_seen']}회"
+            sig_line = f"{idle['signal_note']} → {seen}"
+        challenge = None
+        if idle.get("signal_expr") and idle.get("signal_seen") == 0 and wk >= 4:
+            challenge = f"{wk}주째 그 신호는 한 번도 나오지 않았습니다. 신념입니까, 미루는 핑계입니까?"
+        idle_obj = {"bench": idle["bench"], "weeks": wk, "diffText": diff_text,
+                    "weeksRight": weeks_right, "signalLine": sig_line,
+                    "challenge": challenge, "deadline": idle.get("deadline") or None,
+                    "missed": bool(idle.get("missed"))}
+
+    return {
+        "generatedAt": gen_at,
+        "weekLabel": week_label,
+        "changes": {"firstRun": bool(diff.get("first_run")), "lines": diff.get("lines") or []},
+        "signals": rules.get("changes") or [],
+        "idle": idle_obj,
+        "standing": rules.get("standing") or [],
+        "market": {"indices": idx,
+                   "rates": {k: rt.get(k) for k in ("fedLo", "fedHi", "y2", "y10", "y30", "d10", "spread")},
+                   "fg": {"score": fg.get("score"), "rating": fg.get("rating")} if fg.get("score") is not None else None},
+        "narrative": narrative_html or "",
+    }
+
+
 def main():
     token = fb_login()
     print("firestore: 로그인 성공")
@@ -162,6 +213,16 @@ def main():
 
     send(head + "\n<b>🔍 이번 주 정리</b>\n" + body)
     print("텔레그램: 전송 완료")
+
+    # 앱 전용: 구조화된 최신 리포트를 별도 문서에 저장 (앱이 자체 UI로 렌더)
+    try:
+        gen_at = datetime.datetime.now(SEOUL).strftime("%Y-%m-%d %H:%M")
+        wl = datetime.datetime.now(SEOUL).strftime("%Y-%m-%d")
+        structured = build_structured(pf, market, rules, diff, tw, idle_view, body, wl, gen_at)
+        fb_write(token, "portfolio/latestWeekly", structured)
+        print("firestore: 앱용 리포트 저장 완료")
+    except Exception as e:
+        print(f"firestore: 앱용 리포트 저장 건너뜀 ({type(e).__name__})")
 
     # 구성비 이력 — 앱이 쓰는 portfolio/main 이 아닌 별도 문서에 기록
     try:
