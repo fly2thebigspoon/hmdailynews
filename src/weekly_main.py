@@ -30,6 +30,11 @@ def pct(v, digits=2):
     return f"{v:+.{digits}f}%" if isinstance(v, (int, float)) else "—"
 
 
+def num(v, digits=2):
+    """None 이 섞여도 안전하게. 데이터 소스가 일부 필드만 못 주는 경우가 있다."""
+    return f"{v:.{digits}f}" if isinstance(v, (int, float)) else None
+
+
 def build(pf, market, rules, diff, tw, week_note, idle):
     cur = pf["display_cur"]
     L = []
@@ -93,13 +98,17 @@ def build(pf, market, rules, diff, tw, week_note, idle):
         p_s = f"{p:,.2f}" if isinstance(p, (int, float)) else "—"
         L.append(f"· {name} {p_s} ｜ 주간 {pct(d['week'],1)}")
     rt = market.get("rates") or {}
-    if rt.get("y10") is not None:
-        if rt.get("fedHi") is not None:
-            L.append(f"· 기준금리 {rt['fedLo']:.2f}~{rt['fedHi']:.2f}%")
-        sp = rt.get("spread")
-        L.append(f"· 10Y {rt['y10']:.2f}%"
-                 + (f" ({rt['d10']:+.0f}bp)" if rt.get("d10") is not None else "")
-                 + (f" ｜ 장단기차 {sp:+.2f}%p" if sp is not None else ""))
+    lo, hi = num(rt.get("fedLo")), num(rt.get("fedHi"))
+    if lo and hi:
+        L.append(f"· 기준금리 {lo}~{hi}%")
+    elif hi:
+        L.append(f"· 기준금리 상단 {hi}%")
+    y10 = num(rt.get("y10"))
+    if y10:
+        d10, sp = rt.get("d10"), rt.get("spread")
+        L.append(f"· 10Y {y10}%"
+                 + (f" ({d10:+.0f}bp)" if isinstance(d10, (int, float)) else "")
+                 + (f" ｜ 장단기차 {sp:+.2f}%p" if isinstance(sp, (int, float)) else ""))
     fg = market.get("fg") or {}
     if fg.get("score") is not None:
         L.append(f"· Fear & Greed {fg['score']:.0f} ({fg.get('rating') or '-'})")
